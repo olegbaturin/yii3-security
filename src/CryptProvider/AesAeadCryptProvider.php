@@ -22,10 +22,17 @@ final class AesAeadCryptProvider implements CryptProviderInterface
      * derivation salt.
      */
     private const ALLOWED_CIPHERS = [
-        'AES-128-GCM' => [16, 16],
-        'AES-192-GCM' => [16, 24],
-        'AES-256-GCM' => [16, 32],
+        'AES-128-GCM' => [12, 16],
+        'AES-192-GCM' => [12, 24],
+        'AES-256-GCM' => [12, 32],
     ];
+
+    private bool $randomNounce = false;
+
+    /**
+     * @var string HKDF info value for derivation of message authentication key.
+     */
+    private string $nounceInfo = 'nounce';
 
     /**
      * @var string Hash algorithm for key derivation. Recommend sha256, sha384 or sha512.
@@ -103,7 +110,7 @@ final class AesAeadCryptProvider implements CryptProviderInterface
         string $secret,
         string $info = ''
     ): string {
-        [$blockSize, $keySize] = self::ALLOWED_CIPHERS[$this->cipher];
+        [$nounceSize, $keySize] = self::ALLOWED_CIPHERS[$this->cipher];
 
         $keySalt = random_bytes($keySize);
         if ($passwordBased) {
@@ -112,7 +119,9 @@ final class AesAeadCryptProvider implements CryptProviderInterface
             $key = hash_hkdf($this->kdfAlgorithm, $secret, $keySize, $info, $keySalt);
         }
 
-        $iv = random_bytes($blockSize);
+        $iv = $this->randomNounce
+                ? random_bytes($nounceSize)
+                : hash_hkdf($this->kdfAlgorithm, $key, $nounceSize, $this->nounceInfo);
 
         $encrypted = openssl_encrypt($data, $this->cipher, $key, OPENSSL_RAW_DATA, $iv, $tag, '', $this->tagLength);
         if ($encrypted === false) {
@@ -129,7 +138,9 @@ final class AesAeadCryptProvider implements CryptProviderInterface
          * - MAC: message authentication code, length same as the output of MAC_HASH
          * - IV: initialization vector, length $blockSize
          */
-        return $keySalt . $tag . $iv . $encrypted;
+        return $this->randomNounce
+                ? $keySalt . $iv . $encrypted . $tag
+                : $keySalt . $encrypted . $tag;
     }
 
     public function decrypt(
@@ -139,7 +150,7 @@ final class AesAeadCryptProvider implements CryptProviderInterface
         string $secret,
         string $info
     ): string {
-        [$blockSize, $keySize] = self::ALLOWED_CIPHERS[$this->cipher];
+        [$nounceSize, $keySize] = self::ALLOWED_CIPHERS[$this->cipher];
 
         $keySalt = StringHelper::byteSubstring($data, 0, $keySize);
         if ($passwordBased) {
@@ -148,10 +159,15 @@ final class AesAeadCryptProvider implements CryptProviderInterface
             $key = hash_hkdf($this->kdfAlgorithm, $secret, $keySize, $info, $keySalt);
         }
 
-        $tag = StringHelper::byteSubstring($data, $keySize, $this->tagLength);
+        if ($this->randomNounce) {
+            $iv = StringHelper::byteSubstring($data, $keySize, $nounceSize);
+            $encrypted = StringHelper::byteSubstring($data, $keySize + $nounceSize, -$this->tagLength);
+        } else {
+            $iv = hash_hkdf($this->kdfAlgorithm, $key, $nounceSize, $this->nounceInfo);
+            $encrypted = StringHelper::byteSubstring($data, $keySize, -$this->tagLength);
+        }
 
-        $iv = StringHelper::byteSubstring($data, $keySize + $this->tagLength, $blockSize);
-        $encrypted = StringHelper::byteSubstring($data, $keySize + $this->tagLength + $blockSize);
+        $tag = StringHelper::byteSubstring($data, -$this->tagLength);
 
         $decrypted = openssl_decrypt($encrypted, $this->cipher, $key, OPENSSL_RAW_DATA, $iv, $tag);
         if ($decrypted === false) {

@@ -24,11 +24,18 @@ final class SodiumCryptProvider implements CryptProviderInterface
     private const ALLOWED_CIPHERS = [
         //'AEGIS-128L' => [16, 16], // >=8.4
         //'AEGIS-256' => [32, 32], // >=8.4
-        'AES-256-GCM' => [12, 32],
-        'ChaCha20-Poly1305' => [8, 32],
-        'ChaCha20-Poly1305-IETF' => [12, 32],
-        'XChaCha20-Poly1305-IETF' => [24, 32],
+        'AES-256-GCM' => [SODIUM_CRYPTO_AEAD_AES256GCM_NPUBBYTES, SODIUM_CRYPTO_AEAD_AES256GCM_KEYBYTES],
+        'ChaCha20-Poly1305' => [SODIUM_CRYPTO_AEAD_CHACHA20POLY1305_NPUBBYTES, SODIUM_CRYPTO_AEAD_CHACHA20POLY1305_KEYBYTES],
+        'ChaCha20-Poly1305-IETF' => [SODIUM_CRYPTO_AEAD_CHACHA20POLY1305_IETF_NPUBBYTES, SODIUM_CRYPTO_AEAD_CHACHA20POLY1305_IETF_KEYBYTES],
+        'XChaCha20-Poly1305-IETF' => [SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES, SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_KEYBYTES],
     ];
+
+    private bool $randomNounce = false;
+
+    /**
+     * @var string HKDF info value for derivation of message authentication key.
+     */
+    private string $nounceInfo = 'nounce';
 
     /**
      * @var string Hash algorithm for key derivation. Recommend sha256, sha384 or sha512.
@@ -94,12 +101,16 @@ final class SodiumCryptProvider implements CryptProviderInterface
     ): string {
         [$nounceSize, $keySize] = self::ALLOWED_CIPHERS[$this->cipher];
 
-        $nounce = random_bytes($nounceSize);
+        $keySalt = random_bytes($keySize);
         if ($passwordBased) {
-            $key = hash_pbkdf2($this->kdfAlgorithm, $secret, $nounce, $this->derivationIterations, $keySize, true);
+            $key = hash_pbkdf2($this->kdfAlgorithm, $secret, $keySalt, $this->derivationIterations, $keySize, true);
         } else {
-            $key = hash_hkdf($this->kdfAlgorithm, $secret, $keySize, $info, $nounce);
+            $key = hash_hkdf($this->kdfAlgorithm, $secret, $keySize, $info, $keySalt);
         }
+
+        $nounce = $this->randomNounce
+                ? random_bytes($nounceSize)
+                : hash_hkdf($this->kdfAlgorithm, $key, $nounceSize, $this->nounceInfo);
 
         $encrypted = match ($this->cipher) {
             //'AEGIS-128L' => sodium_crypto_aead_aegis128l_encrypt($data, '', $nounce, $key),
@@ -123,7 +134,9 @@ final class SodiumCryptProvider implements CryptProviderInterface
          * - nounce is KEY_SIZE bytes long
          * - tag: message authentication code, length same as the output of MAC_HASH
          */
-        return $nounce . $encrypted;
+        return $this->randomNounce
+                ? $keySalt . $nounce . $encrypted
+                : $keySalt . $encrypted;
     }
 
     public function decrypt(
@@ -135,14 +148,20 @@ final class SodiumCryptProvider implements CryptProviderInterface
     ): string {
         [$nounceSize, $keySize] = self::ALLOWED_CIPHERS[$this->cipher];
 
-        $nounce = StringHelper::byteSubstring($data, 0, $nounceSize);
+        $keySalt = StringHelper::byteSubstring($data, 0, $keySize);
         if ($passwordBased) {
-            $key = hash_pbkdf2($this->kdfAlgorithm, $secret, $nounce, $this->derivationIterations, $keySize, true);
+            $key = hash_pbkdf2($this->kdfAlgorithm, $secret, $keySalt, $this->derivationIterations, $keySize, true);
         } else {
-            $key = hash_hkdf($this->kdfAlgorithm, $secret, $keySize, $info, $nounce);
+            $key = hash_hkdf($this->kdfAlgorithm, $secret, $keySize, $info, $keySalt);
         }
 
-        $encrypted = StringHelper::byteSubstring($data, $nounceSize);
+        if ($this->randomNounce) {
+            $nounce = StringHelper::byteSubstring($data, $keySize, $nounceSize);
+            $encrypted = StringHelper::byteSubstring($data, $keySize + $nounceSize);
+        } else {
+            $nounce = hash_hkdf($this->kdfAlgorithm, $key, $nounceSize, $this->nounceInfo);
+            $encrypted = StringHelper::byteSubstring($data, $keySize);
+        }
 
         $decrypted = match ($this->cipher) {
             //'AEGIS-128L' => sodium_crypto_aead_aegis128l_decrypt($encrypted, '', $nounce, $key),

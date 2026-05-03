@@ -41,6 +41,7 @@ final class AesCbcCryptProvider implements CryptProviderInterface
      * @var string HKDF info value for derivation of message authentication key.
      */
     private string $authorizationKeyInfo = 'AuthorizationKey';
+
     /**
      * @var int Derivation iterations count.
      * Set as high as possible to hinder dictionary password attacks.
